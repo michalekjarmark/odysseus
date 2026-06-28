@@ -321,6 +321,14 @@ def _is_ollama_openai_compat_url(url: str) -> bool:
 def _ollama_api_root(url: str) -> str:
     """Return a native Ollama API root such as https://ollama.com/api."""
     url = (url or "").strip().rstrip("/")
+    # An OpenAI-compatible chat URL may already be normalized to
+    # ".../v1/chat/completions" (or ".../v1/completions") by the time it reaches
+    # the send path; strip that suffix so the /v1 -> /api mapping below applies
+    # instead of blindly appending /chat (which yields .../chat/completions/chat).
+    for _suffix in ("/chat/completions", "/completions"):
+        if url.endswith(_suffix):
+            url = url[: -len(_suffix)].rstrip("/")
+            break
     parsed = urlparse(url)
     path = (parsed.path or "").rstrip("/")
     if path.endswith("/api/chat"):
