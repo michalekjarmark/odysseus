@@ -7,6 +7,7 @@ Provides token estimation for context usage tracking.
 
 import ipaddress
 import logging
+import os
 import sys
 from typing import Dict, List, Optional, Tuple
 
@@ -413,6 +414,66 @@ def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
         return known, True
 
     return DEFAULT_CONTEXT, False
+
+
+# ---------------------------------------------------------------------------
+# Effective (served) context window for local Ollama
+# ---------------------------------------------------------------------------
+# Ollama allocates a KV cache for the full num_ctx at load time, and its
+# OpenAI-compat (/v1) surface silently caps unspecified requests at ~4096. So
+# the model's advertised/trained window (up to 256k) is neither what a local GPU
+# can serve nor what Ollama actually enforces. We therefore both *request* this
+# many tokens (num_ctx on the native path, see llm_core) and *budget* against it
+# (UI counter, compaction), so the numbers the user sees match reality.
+# OLLAMA_CONTEXT_LENGTH overrides the ceiling (the same knob Ollama itself reads).
+OLLAMA_DEFAULT_PRACTICAL_CTX = 16384
+
+
+def ollama_practical_ctx_cap() -> int:
+    """Ceiling for a local Ollama context window; OLLAMA_CONTEXT_LENGTH overrides."""
+    raw = os.environ.get("OLLAMA_CONTEXT_LENGTH")
+    if raw:
+        try:
+            val = int(raw)
+            if val > 0:
+                return val
+        except (TypeError, ValueError):
+            pass
+    return OLLAMA_DEFAULT_PRACTICAL_CTX
+
+
+def _is_ollama_endpoint(url: str) -> bool:
+    """True for a local Ollama server (native /api or OpenAI-compat /v1).
+
+    Keyed on port 11434 / the ollama.com host so other local OpenAI-compatible
+    servers (llama.cpp, LM Studio on their own ports) — which report and serve
+    their real window — are left uncapped.
+    """
+    try:
+        parsed = urlparse(url or "")
+    except Exception:
+        return False
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if host == "ollama.com" or host.endswith(".ollama.com"):
+        return True
+    return parsed.port == 11434
+
+
+def effective_context_length(endpoint_url: str, model: str) -> int:
+    """Context window actually usable for this endpoint/model.
+
+    For local Ollama, clamp the discovered window to the practical cap that is
+    also sent as num_ctx, so the UI usage counter and the compaction budget
+    match what Ollama really enforces (its /v1 surface silently caps at ~4096).
+    For every other endpoint, return the discovered window unchanged.
+    """
+    ctx = get_context_length(endpoint_url, model)
+    if _is_ollama_endpoint(endpoint_url):
+        cap = ollama_practical_ctx_cap()
+        if not ctx or ctx <= 0:
+            return cap
+        return min(ctx, cap)
+    return ctx
 
 
 def estimate_tokens(messages: List[Dict]) -> int:

@@ -10,7 +10,7 @@ import re
 import os
 from fastapi import HTTPException
 from typing import Optional, Dict, List, Tuple
-from src.model_context import get_context_length, DEFAULT_CONTEXT
+from src.model_context import get_context_length, effective_context_length, DEFAULT_CONTEXT
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -331,6 +331,11 @@ def _ollama_api_root(url: str) -> str:
         return url[: -len("/generate")]
     if path.endswith("/api"):
         return url
+    # Ollama's OpenAI-compat base (".../v1") maps to the native API root
+    # (".../api"), so a configured /v1 endpoint can still be driven natively
+    # (where options.num_ctx works — the /v1 surface ignores it).
+    if path.endswith("/v1"):
+        return url[: -len("/v1")].rstrip("/") + "/api"
     if path == "":
         return url + "/api"
     if _host_match(url, "ollama.com"):
@@ -343,6 +348,32 @@ def _normalize_ollama_url(url: str) -> str:
     """Ensure a native Ollama URL points at /api/chat."""
     base = _ollama_api_root(url)
     return base.rstrip("/") + "/chat"
+
+
+def _chat_provider(url: str) -> str:
+    """Provider to use for the chat *send* path.
+
+    Local Ollama is commonly configured with its OpenAI-compatible ``/v1`` base
+    (the app's own setup hint), which ``_detect_provider`` classifies as
+    "openai". But Ollama's ``/v1`` surface silently caps the context window at
+    ~4096 and ignores per-request context options, so large agent prompts
+    overflow and the model degenerates (e.g. gemma replying only "Hey"). Route
+    those local Ollama ``/v1`` endpoints through the native "ollama" path
+    instead, where ``options.num_ctx`` actually sets the window. Provider
+    detection is left unchanged everywhere else (discovery, headers, resolver).
+
+    Gated on port 11434 (the Ollama default) so other local OpenAI-compatible
+    servers on their own ports — llama.cpp, LM Studio — are NOT hijacked onto
+    Ollama's native path (they have no /api/chat).
+    """
+    provider = _detect_provider(url)
+    if provider == "openai" and _is_ollama_openai_compat_url(url):
+        try:
+            if urlparse(url).port == 11434:
+                return "ollama"
+        except Exception:
+            pass
+    return provider
 
 
 def _normalize_openai_chat_url(url: str) -> str:
@@ -495,6 +526,26 @@ def _build_ollama_payload(
 def _parse_ollama_response(data: dict) -> str:
     message = data.get("message") or {}
     return message.get("content") or data.get("response") or ""
+
+
+# num_ctx to send to a local Ollama server.
+#
+# Ollama defaults num_ctx to a small value (~4096) when the option is omitted,
+# which silently truncates large agent prompts (system + tools + skills +
+# memory + history) and degenerates the output — observed as gemma replying
+# only "Hey". Models also frequently miss the known-context table (e.g. "gemma4"
+# vs the hyphenated "gemma-4" key, or "gpt-oss"), so get_context_length returns
+# the bare DEFAULT_CONTEXT fallback and _build_ollama_payload would skip num_ctx
+# entirely. effective_context_length() resolves the practical served window
+# (discovered value clamped to a cap that fits local VRAM, OLLAMA_CONTEXT_LENGTH
+# override) — the SAME number the UI counter and compaction budget against, so
+# we always send a sane num_ctx and the three views agree.
+def _ollama_num_ctx(url: str, model: str) -> int:
+    """num_ctx to send to a local Ollama server (the effective served window)."""
+    try:
+        return effective_context_length(url, model)
+    except Exception:
+        return get_context_length(url, model)
 
 
 def _host_match(url: str, *domains: str) -> bool:
@@ -1557,7 +1608,7 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
     else:
         messages_copy = non_sys
 
-    provider = _detect_provider(url)
+    provider = _chat_provider(url)
     cache_key = _get_cache_key(url, model, messages_copy, temperature, max_tokens)
     cached_response = _get_cached_response(cache_key)
     if cached_response:
@@ -1572,7 +1623,7 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         target_url = _normalize_ollama_url(url)
         payload = _build_ollama_payload(
             model, messages_copy, temperature, max_tokens,
-            stream=False, num_ctx=get_context_length(url, model),
+            stream=False, num_ctx=_ollama_num_ctx(url, model),
         )
     else:
         target_url = _normalize_openai_chat_url(url)
@@ -1700,7 +1751,7 @@ async def llm_call_async(
     session_id: Optional[str] = None,
 ) -> str:
     """Asynchronous LLM call using httpx with connection pooling, timeout, retry logic, and performance logging."""
-    provider = _detect_provider(url)
+    provider = _chat_provider(url)
     messages_copy = _sanitize_llm_messages(messages)
 
     # Consolidate multiple system messages into one at the start.
@@ -1776,7 +1827,7 @@ async def llm_call_async(
             h.update(headers)
         payload = _build_ollama_payload(
             model, messages_copy, temperature, max_tokens,
-            stream=False, num_ctx=get_context_length(url, model),
+            stream=False, num_ctx=_ollama_num_ctx(url, model),
         )
     else:
         target_url = _normalize_openai_chat_url(url)
@@ -1866,7 +1917,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
       - event: error                       — errors
       - data: [DONE]                       — end of stream
     """
-    provider = _detect_provider(url)
+    provider = _chat_provider(url)
     messages_copy = _sanitize_llm_messages(messages)
 
     # Consolidate multiple system messages into one at the start.
@@ -1894,7 +1945,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             h.update(headers)
         payload = _build_ollama_payload(
             model, messages_copy, temperature, max_tokens,
-            stream=True, tools=tools, num_ctx=get_context_length(url, model),
+            stream=True, tools=tools, num_ctx=_ollama_num_ctx(url, model),
         )
     elif provider == "chatgpt-subscription":
         target_url = _normalize_chatgpt_subscription_url(url)
