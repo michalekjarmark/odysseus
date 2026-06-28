@@ -489,7 +489,7 @@ def generate_image(req: ImageRequest):
 
     # Map quality to num_inference_steps
     default_steps = _args.steps or 8
-    steps_map = {"low": 4, "medium": default_steps, "high": 20, "auto": 12}
+    steps_map = {"low": 4, "medium": default_steps, "high": _args.high_steps, "auto": 12}
     steps = steps_map.get(req.quality, default_steps)
 
     logger.info(f"Generating: {req.prompt[:80]}... ({width}x{height}, {steps} steps)")
@@ -520,7 +520,7 @@ def generate_image(req: ImageRequest):
                 width=width,
                 height=height,
                 num_inference_steps=steps,
-                guidance_scale=3.5,
+                guidance_scale=_args.guidance,
             )
         img = result.images[0]
 
@@ -1140,6 +1140,8 @@ if __name__ == "__main__":
     parser.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16", "float32"])
     parser.add_argument("--device-map", default=None, help="Device map strategy (unused, kept for compat)")
     parser.add_argument("--steps", type=int, default=0, help="Default inference steps (0=auto)")
+    parser.add_argument("--guidance", type=float, default=3.5, help="Guidance scale (CFG) for txt2img. SDXL wants ~7.5; FLUX/SD3 ~3.5.")
+    parser.add_argument("--high-steps", type=int, default=20, help="Inference steps for quality='high' (default 20).")
     parser.add_argument("--width", type=int, default=1024, help="Default output width")
     parser.add_argument("--height", type=int, default=1024, help="Default output height")
     parser.add_argument("--cpu-offload", action="store_true", help="Enable model CPU offload")
