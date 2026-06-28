@@ -10,7 +10,7 @@ import re
 import os
 from fastapi import HTTPException
 from typing import Optional, Dict, List, Tuple
-from src.model_context import get_context_length, DEFAULT_CONTEXT
+from src.model_context import get_context_length, get_context_length_known, DEFAULT_CONTEXT
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -495,6 +495,57 @@ def _build_ollama_payload(
 def _parse_ollama_response(data: dict) -> str:
     message = data.get("message") or {}
     return message.get("content") or data.get("response") or ""
+
+
+# Practical context window to request from a local Ollama server.
+#
+# Ollama defaults num_ctx to a small value (~4096) when the option is omitted,
+# which silently truncates large agent prompts (system + tools + skills +
+# memory + history) and degenerates the output — observed as gemma replying
+# only "Hey". Two things conspire here:
+#   * some local model names miss the known-context table (e.g. "gemma4" vs the
+#     hyphenated "gemma-4" key, or "gpt-oss"), so get_context_length returns the
+#     bare DEFAULT_CONTEXT fallback and _build_ollama_payload deliberately skips
+#     sending num_ctx — leaving Ollama on its tiny default;
+#   * even when matched, the known table holds the model's *trained* max (up to
+#     256k), a KV cache far too large for a typical local GPU to allocate.
+# So for Ollama we always send a practical num_ctx: the discovered window
+# clamped to a value a local GPU can actually serve. Override the ceiling with
+# the OLLAMA_CONTEXT_LENGTH env var (the same knob Ollama itself reads), so the
+# value is effective even when the Ollama app doesn't pick the env var up.
+_OLLAMA_DEFAULT_CTX = 16384
+
+
+def _ollama_practical_ctx_cap() -> int:
+    """Ceiling for the num_ctx sent to Ollama; OLLAMA_CONTEXT_LENGTH overrides it."""
+    raw = os.environ.get("OLLAMA_CONTEXT_LENGTH")
+    if raw:
+        try:
+            val = int(raw)
+            if val > 0:
+                return val
+        except (TypeError, ValueError):
+            pass
+    return _OLLAMA_DEFAULT_CTX
+
+
+def _ollama_num_ctx(url: str, model: str) -> int:
+    """Resolve the num_ctx to send to a local Ollama server.
+
+    Returns the model's discovered window when it's both known and within the
+    practical cap; otherwise the cap (default 16384, overridable via
+    OLLAMA_CONTEXT_LENGTH). This guarantees we never leave Ollama on its tiny
+    ~4096 default for models missing from the known table, and never request a
+    KV cache too large for local VRAM.
+    """
+    cap = _ollama_practical_ctx_cap()
+    try:
+        ctx, known = get_context_length_known(url, model)
+    except Exception:
+        return cap
+    if not known or ctx <= 0 or ctx == DEFAULT_CONTEXT:
+        return cap
+    return min(ctx, cap)
 
 
 def _host_match(url: str, *domains: str) -> bool:
@@ -1572,7 +1623,7 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         target_url = _normalize_ollama_url(url)
         payload = _build_ollama_payload(
             model, messages_copy, temperature, max_tokens,
-            stream=False, num_ctx=get_context_length(url, model),
+            stream=False, num_ctx=_ollama_num_ctx(url, model),
         )
     else:
         target_url = _normalize_openai_chat_url(url)
@@ -1776,7 +1827,7 @@ async def llm_call_async(
             h.update(headers)
         payload = _build_ollama_payload(
             model, messages_copy, temperature, max_tokens,
-            stream=False, num_ctx=get_context_length(url, model),
+            stream=False, num_ctx=_ollama_num_ctx(url, model),
         )
     else:
         target_url = _normalize_openai_chat_url(url)
@@ -1894,7 +1945,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             h.update(headers)
         payload = _build_ollama_payload(
             model, messages_copy, temperature, max_tokens,
-            stream=True, tools=tools, num_ctx=get_context_length(url, model),
+            stream=True, tools=tools, num_ctx=_ollama_num_ctx(url, model),
         )
     elif provider == "chatgpt-subscription":
         target_url = _normalize_chatgpt_subscription_url(url)
