@@ -46,7 +46,13 @@ def test_llm_call_posts_native_ollama_payload(monkeypatch):
     assert seen["url"] == "https://ollama.com/api/chat"
     assert seen["headers"]["Authorization"] == "Bearer ollama-key"
     assert seen["json"]["stream"] is False
-    assert seen["json"]["options"] == {"temperature": 0.2, "num_predict": 7}
+    opts = seen["json"]["options"]
+    assert opts["temperature"] == 0.2
+    assert opts["num_predict"] == 7
+    # The native path now always sends a sane served window (from
+    # effective_context_length, clamped for Ollama) so prompts aren't silently
+    # truncated at Ollama's 2048 default — see the local-Ollama context fix.
+    assert opts["num_ctx"] > 0
 
 
 def test_llm_call_posts_bare_local_ollama_to_native_api(monkeypatch):
@@ -90,11 +96,15 @@ def test_openai_compatible_chat_url_shapes(monkeypatch):
     monkeypatch.setattr(llm_core.httpx, "post", fake_post)
     llm_core._response_cache.clear()
 
+    # Non-Ollama OpenAI-compatible servers (e.g. LM Studio on its own port) keep
+    # the /v1/chat/completions surface. Only LOCAL Ollama (port 11434) is rerouted
+    # to the native /api/chat path — using 11434 here would now hit that reroute
+    # (covered by test_llm_call_posts_bare_local_ollama_to_native_api).
     cases = [
-        ("http://localhost:11434/v1", "http://localhost:11434/v1/chat/completions"),
+        ("http://localhost:1234/v1", "http://localhost:1234/v1/chat/completions"),
         (
-            "http://localhost:11434/v1/chat/completions",
-            "http://localhost:11434/v1/chat/completions",
+            "http://localhost:1234/v1/chat/completions",
+            "http://localhost:1234/v1/chat/completions",
         ),
     ]
     for i, (base_url, expected_url) in enumerate(cases):
@@ -254,9 +264,11 @@ def test_build_ollama_payload_omits_default_context_fallback():
 
 
 def test_llm_call_threads_discovered_num_ctx(monkeypatch):
-    """When get_context_length returns a real, large value, it ends up
-    in the outgoing Ollama request as options.num_ctx (issue #909)."""
-    monkeypatch.setattr(llm_core, "get_context_length",
+    """When the effective (served) context window is a real, large value, it ends
+    up in the outgoing Ollama request as options.num_ctx (issue #909). The source
+    is now effective_context_length (clamp/override aware), not the raw
+    get_context_length the original test patched."""
+    monkeypatch.setattr(llm_core, "effective_context_length",
                         lambda url, model: 32768)
 
     seen = {}
@@ -298,7 +310,7 @@ def test_stream_llm_threads_discovered_num_ctx(monkeypatch):
             "stream": True,
         }
 
-    monkeypatch.setattr(llm_core, "get_context_length",
+    monkeypatch.setattr(llm_core, "effective_context_length",
                         lambda url, model: 32768)
     monkeypatch.setattr(llm_core, "_build_ollama_payload",
                         spy_build_ollama_payload)

@@ -341,8 +341,12 @@ def _ollama_api_root(url: str) -> str:
         return url
     # Ollama's OpenAI-compat base (".../v1") maps to the native API root
     # (".../api"), so a configured /v1 endpoint can still be driven natively
-    # (where options.num_ctx works — the /v1 surface ignores it).
-    if path.endswith("/v1"):
+    # (where options.num_ctx works — the /v1 surface ignores it). Guard on the
+    # host: this rewrite must only touch Ollama (ollama.com or the local :11434
+    # default — the same gate _chat_provider reroutes on). A generic
+    # OpenAI-compatible /v1 on another host (api.openai.com, LM Studio) is NOT
+    # Ollama and must be returned untouched.
+    if path.endswith("/v1") and (_host_match(url, "ollama.com") or parsed.port == 11434):
         return url[: -len("/v1")].rstrip("/") + "/api"
     if path == "":
         return url + "/api"

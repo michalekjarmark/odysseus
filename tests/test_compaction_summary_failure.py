@@ -36,7 +36,7 @@ class TestCompactionSummaryFailure:
         # Force compaction to trigger (pct over COMPACT_THRESHOLD) and make the
         # summary call fail, so the except branch runs. Stub everything so the
         # test is hermetic (no network, no real endpoint resolution).
-        orig_ctx = cc.get_context_length
+        orig_ctx = cc.effective_context_length
         orig_est = cc.estimate_tokens
         orig_call = cc.llm_call_async
         orig_resolve = cc.resolve_endpoint
@@ -45,7 +45,7 @@ class TestCompactionSummaryFailure:
         async def _boom(*a, **k):
             raise RuntimeError("summary model down")
 
-        cc.get_context_length = lambda url, model: context_length
+        cc.effective_context_length = lambda url, model: context_length
         cc.estimate_tokens = lambda msgs: 10000  # well over the threshold
         cc.llm_call_async = _boom
         cc.resolve_endpoint = lambda *a, **k: (None, None, None)
@@ -61,7 +61,7 @@ class TestCompactionSummaryFailure:
                 )
             )
         finally:
-            cc.get_context_length = orig_ctx
+            cc.effective_context_length = orig_ctx
             cc.estimate_tokens = orig_est
             cc.llm_call_async = orig_call
             cc.resolve_endpoint = orig_resolve
