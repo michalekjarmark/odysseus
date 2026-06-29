@@ -890,6 +890,103 @@ def _iter_xml_direct(text):
     return _iter_backref_blocks(text, _XML_DIRECT_OPEN_RE, _XML_DIRECT_CLOSE_ANY_RE, ci=True)
 
 
+_JSON_TC_NAME_KEYS = ("tool_name", "tool", "name")
+_JSON_TC_ARG_KEYS = ("params", "arguments", "parameters", "args", "input")
+# An empty (whitespace-only body) fenced code block, e.g. ```json\n\n``` — bounded,
+# no backtracking. Used to clean the husk left after a JSON tool call is stripped.
+_EMPTY_FENCE_RE = re.compile(r"```[a-zA-Z0-9_]*[ \t]*\n?[ \t\r\n]*```")
+
+
+def _json_obj_to_tool_block(obj) -> Optional[ToolBlock]:
+    """Convert a model's JSON-object tool call into a ToolBlock.
+
+    Weak local models that can't reliably emit the fenced-tool / native format
+    often print the call as a JSON object instead, e.g.
+        {"tool_name": "generate_image", "params": {"prompt": "...", "size": "..."}}
+    or the OpenAI-ish nested {"function": {"name": "X", "arguments": {...}}}, or a
+    flat {"name": "X", "prompt": "..."}. Extract (name, args) and delegate to the
+    canonical function_call_to_tool_block (which resolves aliases/fuzzy names and
+    formats per-tool content), so the full tool set is handled in one place.
+    """
+    if not isinstance(obj, dict):
+        return None
+    fn = obj.get("function")
+    if isinstance(fn, dict):
+        name = fn.get("name")
+        args = fn.get("arguments")
+    else:
+        name = next((obj[k] for k in _JSON_TC_NAME_KEYS if isinstance(obj.get(k), str)), None)
+        args = next((obj[k] for k in _JSON_TC_ARG_KEYS if k in obj), None)
+    if not isinstance(name, str) or not name.strip():
+        return None
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except (ValueError, TypeError):
+            args = None
+    if args is None:
+        # No explicit args container: treat the remaining top-level keys as args
+        # (e.g. {"name": "generate_image", "prompt": "..."}).
+        args = {k: v for k, v in obj.items()
+                if k not in _JSON_TC_NAME_KEYS and k not in _JSON_TC_ARG_KEYS and k != "function"}
+    if not isinstance(args, dict):
+        return None
+    from src.tool_schemas import function_call_to_tool_block
+    return function_call_to_tool_block(name.strip(), json.dumps(args))
+
+
+def _iter_json_object_spans(text: str):
+    """Yield (start, end) of each top-level balanced ``{...}`` region, string-aware.
+
+    A single linear scan (O(n), no regex backtracking — safe against untrusted
+    model output, CodeQL py/polynomial-redos) that skips braces inside JSON
+    strings. Nested objects are returned as one outer span."""
+    depth = 0
+    start = -1
+    in_str = False
+    esc = False
+    for i, ch in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == '{':
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == '}':
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    yield start, i + 1
+                    start = -1
+
+
+def _parse_json_tool_call(text: str):
+    """Recover a tool call a model emitted as a JSON object in prose or a ```json
+    fence (no fenced-tool / native pattern matches it). Returns ``(block, (start,
+    end))`` for the first convertible object, or None. Fallback-only — see the
+    gating in parse_tool_blocks."""
+    for s, e in _iter_json_object_spans(text):
+        frag = text[s:e]
+        if '"' not in frag:
+            continue
+        try:
+            obj = json.loads(frag)
+        except (ValueError, TypeError):
+            continue
+        block = _json_obj_to_tool_block(obj)
+        if block:
+            return block, (s, e)
+    return None
+
+
 def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
     """Extract executable tool blocks from LLM response text.
 
@@ -1018,6 +1115,18 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
         if raw_web_json:
             blocks.append(raw_web_json[0])
 
+    # Pattern 7: a weak local model emitted the whole tool call as a JSON object
+    # in prose or a ```json fence, e.g. {"tool_name": "generate_image",
+    # "params": {...}} — no pattern above matches it, so the call was silently
+    # dropped (the model "printed" the tool instead of running it). Fallback-only,
+    # and gated on `not skip_fenced`: native function-calling models have the
+    # structured channel and routinely show illustrative JSON, so for them a bare
+    # JSON object is display text, not an action (mirrors Pattern 6).
+    if not blocks and not skip_fenced:
+        json_tc = _parse_json_tool_call(text)
+        if json_tc:
+            blocks.append(json_tc[0])
+
     return blocks
 
 
@@ -1051,6 +1160,14 @@ def strip_tool_blocks(text: str, skip_fenced: bool = False) -> str:
         if raw_web_json:
             _, (start, end) = raw_web_json
             cleaned = cleaned[:start] + cleaned[end:]
+        # Remove a recovered JSON-object tool call (Pattern 7) so the raw JSON
+        # the model printed doesn't also show as text under the result, then drop
+        # the now-empty ```json fence it usually leaves behind.
+        json_tc = _parse_json_tool_call(cleaned)
+        if json_tc:
+            _, (start, end) = json_tc
+            cleaned = cleaned[:start] + cleaned[end:]
+            cleaned = _EMPTY_FENCE_RE.sub('', cleaned)
     # Strip bare <invoke> blocks not wrapped in <tool_call>
     cleaned = _strip_bare_invoke_markup(cleaned)
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
