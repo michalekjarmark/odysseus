@@ -177,7 +177,10 @@ DEFAULT_SETTINGS = {
     "skill_autosave_min_confidence": 0.85,
     # Max relevant skills injected into the prompt for one request. The skills
     # library can grow beyond this; cleanup/retirement is an explicit review flow.
-    "skill_max_injected": 3,
+    # Hard-capped at 12 in agent_loop. Raised from 3 → 5: with large local context
+    # windows (per-model / global Ollama context), 3 was too stingy — a turn that
+    # spans e.g. document-editing + web + files could miss a relevant procedure.
+    "skill_max_injected": 5,
     # Reminders
     "reminder_channel": "browser",   # "browser" | "email" | "ntfy" | "webhook"
     "reminder_llm_synthesis": False,
