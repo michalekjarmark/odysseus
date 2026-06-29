@@ -21,8 +21,12 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Pattern 1: ```bash ... ``` fenced code blocks
+# After the tag, accept EITHER a newline (the standard multi-line body) OR inline
+# whitespace before same-line content. Weak local models (e.g. some GGUF finetunes)
+# sometimes emit the whole call on a single line — ```read_file "path"``` — which the
+# newline-only form silently dropped for EVERY tool tag, not just read_file.
 _TOOL_BLOCK_RE = re.compile(
-    r"```(" + "|".join(TOOL_TAGS) + r")\s*\n([\s\S]*?)```",
+    r"```(" + "|".join(TOOL_TAGS) + r")(?:[ \t]*\n|[ \t]+)([\s\S]*?)```",
     re.IGNORECASE,
 )
 
@@ -1024,6 +1028,20 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
             content = m.group(2).strip()
             if not content:
                 continue
+            # Single-line / single-token argument: weak models quote the inline arg,
+            # e.g. ```read_file "C:\path"```. For non-shell path/query tools, unwrap
+            # one layer of matching quotes so the arg isn't taken literally (the
+            # read_file/ls/glob arg parsers use the raw content as the path/query).
+            if (
+                "\n" not in content
+                and tag not in ("python", "bash")
+                and len(content) >= 2
+                and content[0] in "\"'"
+                and content[-1] == content[0]
+            ):
+                content = content[1:-1].strip()
+                if not content:
+                    continue
             # If a code block's content is an <invoke> XML call (some models wrap
             # tool calls in ```python or ```xml fences), parse the invoke instead.
             if '<invoke' in content:
