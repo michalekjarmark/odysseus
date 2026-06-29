@@ -344,7 +344,27 @@ def _parse_qualified_mcp_args(tool: str, content: str) -> tuple[Dict, Optional[s
 
 
 def _parse_generate_image(content: str) -> Dict:
-    lines = content.strip().split("\n")
+    # Native tool calls arrive as a JSON object (function_call_to_tool_block
+    # serializes the args with json.dumps), while the fenced-block protocol uses a
+    # line-based format (prompt / model / size / quality). Accept BOTH. Without the
+    # JSON branch a native call's whole `{"prompt": "...", "size": "..."}` string was
+    # taken verbatim as line 0 = the prompt, so SDXL received a prompt polluted with
+    # JSON syntax and truncated by CLIP's 77-token limit (garbage composition), and
+    # the real `size` was dropped (every image came out 1024x1024).
+    text = (content or "").strip()
+    if text.startswith("{"):
+        try:
+            obj = json.loads(text)
+        except (ValueError, TypeError):
+            obj = None
+        if isinstance(obj, dict) and (obj.get("prompt") or obj.get("image_prompt")):
+            args = {"prompt": str(obj.get("prompt") or obj.get("image_prompt") or "").strip()}
+            for key in ("model", "size", "quality"):
+                val = obj.get(key)
+                if val is not None and str(val).strip():
+                    args[key] = str(val).strip()
+            return args
+    lines = text.split("\n")
     args = {"prompt": lines[0].strip() if lines else ""}
     for i, key in enumerate(["model", "size", "quality"], 1):
         if len(lines) > i and lines[i].strip():
