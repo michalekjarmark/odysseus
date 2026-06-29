@@ -2962,6 +2962,12 @@ async def stream_agent_loop(
 
         # ── Fallback: auto-create document if model dumped large code in chat ──
         # If no create_document tool was used, check for big code blocks in text
+        _auto_doc_terminal = False
+        # Real (model-issued) tool activity this round, BEFORE the auto-doc fallback
+        # may append a synthetic create_document. If this is 0 and the only "tool" is
+        # the auto-created document, the round is the model's final answer (code dumped
+        # in chat) — there's nothing to react to, so we must NOT loop.
+        _real_calls_before_autodoc = len(tool_blocks) + len(native_tool_calls)
         has_doc_tool = any(
             b.tool_type in ("create_document", "update_document")
             for b in tool_blocks
@@ -2985,6 +2991,12 @@ async def stream_agent_loop(
                 doc_title = f"Code ({doc_lang})"
                 tb = ToolBlock("create_document", f"{doc_title}\n{doc_lang}\n{code_body}")
                 tool_blocks.append(tb)
+                # If the model made no real tool call this round, this auto-created
+                # document IS its final answer — persist it but end the turn instead
+                # of looping (re-prompting just makes weak models re-emit the whole
+                # document over and over until the context runs out).
+                if _real_calls_before_autodoc == 0:
+                    _auto_doc_terminal = True
                 # Stream the document open event
                 yield f'data: {json.dumps({"type": "doc_stream_open", "title": doc_title, "language": doc_lang})}\n\n'
                 yield f'data: {json.dumps({"type": "doc_stream_delta", "content": code_body})}\n\n'
@@ -3538,6 +3550,13 @@ async def stream_agent_loop(
         # arrives as the next message and the agent resumes from there. The
         # question text is already in the streamed response, so it persists.
         if _awaiting_user:
+            break
+
+        # A document auto-created from a code block (no real tool call this round) is
+        # the model's finished answer — it's now persisted + streamed to the editor.
+        # Looping would feed it back and small models would just re-emit it endlessly.
+        if _auto_doc_terminal:
+            logger.info("[agent] auto-created document is terminal — ending turn (round %d)", round_num)
             break
 
         # Feed results back to LLM for next round
