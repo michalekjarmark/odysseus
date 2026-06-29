@@ -442,7 +442,14 @@ OLLAMA_DEFAULT_PRACTICAL_CTX = 16384
 
 
 def ollama_practical_ctx_cap() -> int:
-    """Ceiling for a local Ollama context window; OLLAMA_CONTEXT_LENGTH overrides."""
+    """Ceiling for a local Ollama context window (when no per-model override).
+
+    Precedence: env ``OLLAMA_CONTEXT_LENGTH`` (a hard ops override) > the global
+    ``ollama_default_context`` setting (the UI knob that applies to ALL local Ollama
+    models at once, so the user need not add a per-model entry for each) >
+    the built-in ``OLLAMA_DEFAULT_PRACTICAL_CTX`` (16384). A per-model override in
+    ``effective_context_length`` still wins over all of this and may EXCEED it.
+    """
     raw = os.environ.get("OLLAMA_CONTEXT_LENGTH")
     if raw:
         try:
@@ -451,6 +458,13 @@ def ollama_practical_ctx_cap() -> int:
                 return val
         except (TypeError, ValueError):
             pass
+    try:
+        from src.settings import get_setting
+        global_default = int(get_setting("ollama_default_context", 0) or 0)
+        if global_default > 0:
+            return global_default
+    except Exception:
+        pass
     return OLLAMA_DEFAULT_PRACTICAL_CTX
 
 

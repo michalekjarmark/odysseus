@@ -314,3 +314,60 @@ class TestEffectiveContextOverride:
         ctx = model_context.budget_context_for_model(url, "qwen3.5:9b", fallback=16384)
         assert ctx == 32768
         assert compute_input_token_budget(DEFAULT_BUDGET, ctx, explicit=False) == int(32768 * 0.85)
+
+
+class TestGlobalDefaultContext:
+    """Global ``ollama_default_context`` setting: raises the practical cap for ALL
+    local Ollama models without a per-model override, so the user need not add an
+    entry for each. Per-model override still wins (and may exceed it); the env var
+    OLLAMA_CONTEXT_LENGTH hard-overrides both; non-Ollama endpoints are untouched.
+    """
+
+    def setup_method(self):
+        model_context._context_cache.clear()
+
+    def _patch_settings(self, monkeypatch, *, overrides=None, global_default=0):
+        import src.settings as settings
+        mapping = overrides or {}
+
+        def fake(key, default=None):
+            if key == "ollama_model_context_overrides":
+                return mapping
+            if key == "ollama_default_context":
+                return global_default
+            return default
+
+        monkeypatch.setattr(settings, "get_setting", fake)
+
+    def test_global_default_raises_cap(self, monkeypatch):
+        monkeypatch.delenv("OLLAMA_CONTEXT_LENGTH", raising=False)
+        self._patch_settings(monkeypatch, global_default=65536)
+        assert model_context.ollama_practical_ctx_cap() == 65536
+        # A model with no per-model override now clamps to the global default.
+        monkeypatch.setattr(model_context, "_query_context_length", lambda u, m: (131072, True))
+        url = "http://127.0.0.1:11434/v1"
+        assert model_context.effective_context_length(url, "gemma4:e4b") == 65536
+
+    def test_per_model_override_still_wins_over_global(self, monkeypatch):
+        monkeypatch.delenv("OLLAMA_CONTEXT_LENGTH", raising=False)
+        self._patch_settings(monkeypatch, overrides={"qwen3.5:9b": 100000}, global_default=65536)
+        monkeypatch.setattr(model_context, "_query_context_length", lambda u, m: (131072, True))
+        url = "http://127.0.0.1:11434/v1"
+        assert model_context.effective_context_length(url, "qwen3.5:9b") == 100000  # override
+        assert model_context.effective_context_length(url, "gemma4:e4b") == 65536   # global
+
+    def test_env_hard_overrides_setting(self, monkeypatch):
+        monkeypatch.setenv("OLLAMA_CONTEXT_LENGTH", "20000")
+        self._patch_settings(monkeypatch, global_default=65536)
+        assert model_context.ollama_practical_ctx_cap() == 20000
+
+    def test_zero_global_default_falls_back_to_builtin(self, monkeypatch):
+        monkeypatch.delenv("OLLAMA_CONTEXT_LENGTH", raising=False)
+        self._patch_settings(monkeypatch, global_default=0)
+        assert model_context.ollama_practical_ctx_cap() == model_context.OLLAMA_DEFAULT_PRACTICAL_CTX
+
+    def test_global_default_ignored_for_non_ollama(self, monkeypatch):
+        monkeypatch.delenv("OLLAMA_CONTEXT_LENGTH", raising=False)
+        self._patch_settings(monkeypatch, global_default=65536)
+        monkeypatch.setattr(model_context, "_query_context_length", lambda u, m: (128000, True))
+        assert model_context.effective_context_length("https://api.openai.com/v1", "gpt-4o") == 128000

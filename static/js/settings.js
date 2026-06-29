@@ -811,6 +811,7 @@ async function initOllamaContextSettings() {
   const listEl = el('set-ollamaCtxList');
   const addBtn = el('set-ollamaCtxAdd');
   const msg = el('set-ollamaCtxMsg');
+  const globalIn = el('set-ollamaCtxGlobal');
   if (!listEl || !addBtn) return;
 
   // Currently-served local (Ollama) model ids, picked from a dropdown.
@@ -835,9 +836,11 @@ async function initOllamaContextSettings() {
       const ctx = parseInt(num && num.value, 10);
       if (mid && Number.isFinite(ctx) && ctx > 0) overrides[mid] = ctx;
     });
+    const globalRaw = parseInt(globalIn && globalIn.value, 10);
+    const globalCtx = (Number.isFinite(globalRaw) && globalRaw > 0) ? globalRaw : 0;
     try {
       await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ollama_model_context_overrides: overrides }) });
+        body: JSON.stringify({ ollama_model_context_overrides: overrides, ollama_default_context: globalCtx }) });
       if (msg) { msg.textContent = 'Saved — applies on the model’s next message'; msg.style.color = 'var(--fg)'; setTimeout(() => { msg.textContent = ''; }, 2500); }
     } catch (e) { if (msg) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; } }
   }
@@ -906,8 +909,13 @@ async function initOllamaContextSettings() {
     const overrides = (settings && settings.ollama_model_context_overrides) || {};
     listEl.innerHTML = '';
     Object.entries(overrides).forEach(([mid, ctx]) => listEl.appendChild(_row(mid, ctx)));
+    if (globalIn) {
+      const gd = settings && parseInt(settings.ollama_default_context, 10);
+      globalIn.value = (Number.isFinite(gd) && gd > 0) ? gd : '';
+    }
   } catch (e) { console.warn('Failed to load context overrides', e); }
 
+  if (globalIn) globalIn.addEventListener('change', save);
   addBtn.addEventListener('click', () => { listEl.appendChild(_row('', '')); _refreshSelectOptions(); });
   _refreshSelectOptions();
 }
