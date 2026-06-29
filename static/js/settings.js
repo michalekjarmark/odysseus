@@ -811,11 +811,10 @@ async function initOllamaContextSettings() {
   const listEl = el('set-ollamaCtxList');
   const addBtn = el('set-ollamaCtxAdd');
   const msg = el('set-ollamaCtxMsg');
-  const datalist = el('set-ollamaCtxModels');
   if (!listEl || !addBtn) return;
 
-  // Suggest currently-served local (Ollama) model ids, but allow any text so a
-  // model can be pre-configured before it's pulled.
+  // Currently-served local (Ollama) model ids, picked from a dropdown.
+  let _localModels = [];
   try {
     const modelsRes = await fetch('/api/models', { credentials: 'same-origin' });
     const modelsData = await modelsRes.json();
@@ -824,18 +823,16 @@ async function initOllamaContextSettings() {
       if (item.category !== 'local') return;
       (item.models || []).concat(item.models_extra || []).forEach(mid => ids.add(mid));
     });
-    if (datalist) {
-      datalist.innerHTML = '';
-      sortModelIds([...ids]).forEach(mid => { const opt = document.createElement('option'); opt.value = mid; datalist.appendChild(opt); });
-    }
+    _localModels = sortModelIds([...ids]);
   } catch (e) { console.warn('Failed to load models for context overrides', e); }
 
   async function save() {
     const overrides = {};
     listEl.querySelectorAll('.settings-row').forEach(r => {
-      const inputs = r.querySelectorAll('input');
-      const mid = (inputs[0].value || '').trim();
-      const ctx = parseInt(inputs[1].value, 10);
+      const sel = r.querySelector('select');
+      const num = r.querySelector('input[type="number"]');
+      const mid = (sel && sel.value || '').trim();
+      const ctx = parseInt(num && num.value, 10);
       if (mid && Number.isFinite(ctx) && ctx > 0) overrides[mid] = ctx;
     });
     try {
@@ -845,15 +842,50 @@ async function initOllamaContextSettings() {
     } catch (e) { if (msg) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; } }
   }
 
+  function _modelsTakenByOtherRows(exceptRow) {
+    const taken = new Set();
+    listEl.querySelectorAll('.settings-row').forEach(r => {
+      if (r === exceptRow) return;
+      const sel = r.querySelector('select');
+      if (sel && sel.value) taken.add(sel.value);
+    });
+    return taken;
+  }
+
+  // Rebuild every row's <option> list so a model already configured in another
+  // row can't be picked twice (keeps the override map one-entry-per-model).
+  function _refreshSelectOptions() {
+    listEl.querySelectorAll('.settings-row').forEach(r => {
+      const sel = r.querySelector('select');
+      if (!sel) return;
+      const current = sel.value;
+      const taken = _modelsTakenByOtherRows(r);
+      sel.innerHTML = '';
+      const ph = document.createElement('option');
+      ph.value = ''; ph.textContent = '— select a model —';
+      sel.appendChild(ph);
+      // A saved override for a model that isn't currently served must still show.
+      const opts = _localModels.slice();
+      if (current && !opts.includes(current)) opts.unshift(current);
+      opts.forEach(mid => {
+        if (taken.has(mid) && mid !== current) return;
+        const o = document.createElement('option');
+        o.value = mid;
+        o.textContent = mid + (_localModels.includes(mid) ? '' : ' (not served)');
+        sel.appendChild(o);
+      });
+      sel.value = current;
+    });
+  }
+
   function _row(model, ctx) {
     const row = document.createElement('div');
     row.className = 'settings-row';
     row.style.cssText = 'display:flex;align-items:center;gap:6px;';
-    const mIn = document.createElement('input');
-    mIn.type = 'text'; mIn.placeholder = 'model id (e.g. qwen3.5:9b)';
-    mIn.setAttribute('list', 'set-ollamaCtxModels');
-    mIn.value = model || '';
-    mIn.style.cssText = 'flex:1;min-width:0;padding:5px;';
+    const sel = document.createElement('select');
+    sel.className = 'settings-select';
+    sel.style.cssText = 'flex:1;min-width:0;';
+    if (model) { const o = document.createElement('option'); o.value = model; o.textContent = model; sel.appendChild(o); sel.value = model; }
     const cIn = document.createElement('input');
     cIn.type = 'number'; cIn.min = '512'; cIn.step = '1024'; cIn.placeholder = 'num_ctx';
     cIn.value = (ctx !== null && ctx !== undefined && ctx !== '') ? ctx : '';
@@ -861,10 +893,10 @@ async function initOllamaContextSettings() {
     const rm = document.createElement('button');
     rm.type = 'button'; rm.className = 'settings-fallback-remove'; rm.textContent = '✕';
     rm.title = 'Remove';
-    rm.addEventListener('click', () => { row.remove(); save(); });
-    mIn.addEventListener('change', save);
+    rm.addEventListener('click', () => { row.remove(); _refreshSelectOptions(); save(); });
+    sel.addEventListener('change', () => { _refreshSelectOptions(); save(); });
     cIn.addEventListener('change', save);
-    row.appendChild(mIn); row.appendChild(cIn); row.appendChild(rm);
+    row.appendChild(sel); row.appendChild(cIn); row.appendChild(rm);
     return row;
   }
 
@@ -876,7 +908,8 @@ async function initOllamaContextSettings() {
     Object.entries(overrides).forEach(([mid, ctx]) => listEl.appendChild(_row(mid, ctx)));
   } catch (e) { console.warn('Failed to load context overrides', e); }
 
-  addBtn.addEventListener('click', () => { listEl.appendChild(_row('', '')); });
+  addBtn.addEventListener('click', () => { listEl.appendChild(_row('', '')); _refreshSelectOptions(); });
+  _refreshSelectOptions();
 }
 
 /* ── Vision ── */

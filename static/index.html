@@ -1598,7 +1598,6 @@
             <h2 style="display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:1px;opacity:0.6;flex-shrink:0"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>Model Context (Ollama)</h2>
             <div class="admin-toggle-sub" style="margin-bottom:8px">Manually set the context window (<code>num_ctx</code>) for specific local Ollama models. This overrides the default 16k cap — small models often fit far more on your GPU, and the chosen value flows to num_ctx, the usage counter, the input budget, and compaction together. Higher = more VRAM used; only set what your card can serve. Applies on the model's next message.</div>
             <div id="set-ollamaCtxList" class="settings-col" style="gap:6px;"></div>
-            <datalist id="set-ollamaCtxModels"></datalist>
             <button type="button" class="settings-fallback-add" id="set-ollamaCtxAdd" title="Add a per-model context override">+ Add model</button>
             <div id="set-ollamaCtxMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);margin-top:4px;"></div>
           </div>
