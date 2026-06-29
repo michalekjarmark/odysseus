@@ -887,6 +887,29 @@ def _is_casual_low_signal(text: str) -> bool:
     return len(tail_words) <= 2
 
 
+def _looks_substantive(text: str) -> bool:
+    """Language-agnostic check that a turn carries an actionable request.
+
+    The domain classifier below keys off English keywords, so a non-English
+    request ("wygeneruj mi obraz człowieka") matches no domain and would
+    otherwise be flagged low-signal purely by absence — then shunted to the
+    stripped direct-reply path (no system prompt, no tools, 128-token cap, with
+    thinking excluded from the visible answer). That breaks skills (e.g. image
+    generation) and starves reasoning models, which spend the tiny budget on
+    hidden thinking and emit an empty visible reply that falls back to "Hey."
+    Treat a turn with real content — two or more word tokens, or a question — as
+    substantive regardless of language so it reaches the full agent path and
+    embedding-based tool RAG. Genuine greetings/acks (handled earlier by
+    _LOW_SIGNAL_RE / _is_casual_low_signal, or a bare single word) stay cheap.
+    """
+    s = str(text or "").strip()
+    if not s:
+        return False
+    if s.endswith("?"):
+        return True
+    return len(re.findall(r"\w+", s, re.UNICODE)) >= 2
+
+
 def _is_contextual_retry_continuation(messages: List[Dict], text: str) -> bool:
     """Treat "try again / it failed" as a continuation only for active tool work.
 
@@ -1011,7 +1034,7 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
            r"\b(?:home ?assistant|miniflux|gitea|linkding|jellyfin)\b"):
         domains.add("integrations")
 
-    low_signal = not continuation and not domains
+    low_signal = not continuation and not domains and not _looks_substantive(text)
     return {
         "low_signal": low_signal,
         "continuation": continuation,
@@ -2117,7 +2140,13 @@ async def stream_agent_loop(
                 [(endpoint_url, model, headers)] + list(fallbacks or []),
                 direct_messages,
                 temperature=temperature,
-                max_tokens=min(max_tokens or 128, 128),
+                # Reasoning models (gemma4, gpt-oss, qwen coder) spend the budget
+                # on hidden thinking, which is excluded from the visible reply
+                # below; a 128 cap left them with nothing to show -> empty ->
+                # "Hey." fallback. Give enough room to finish a short think AND a
+                # one-liner. Non-reasoning models stop on their own after a brief
+                # greeting, so the higher ceiling costs them nothing.
+                max_tokens=min(max_tokens or 1024, 1024),
                 prompt_type=None,
                 tools=None,
                 timeout=int(get_setting("agent_stream_timeout_seconds", 300) or 300),
