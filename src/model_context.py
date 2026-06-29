@@ -471,14 +471,49 @@ def _is_ollama_endpoint(url: str) -> bool:
     return parsed.port == 11434
 
 
+def _model_ctx_override(model: str) -> Optional[int]:
+    """Manual per-model context-window override from settings, keyed by model id.
+
+    Lets the user raise (or lower) the served window for a specific local model
+    without code edits — and crucially ABOVE the global practical cap, since small
+    models often fit far more than the 16384 default. Returns a positive int or
+    None. Looked up by exact model id first, then case-insensitively, so the value
+    the UI shows for a model id always matches what's applied. Settings access is
+    lazy/defensive so model_context stays importable without a settings file.
+    """
+    try:
+        from src.settings import get_setting
+        overrides = get_setting("ollama_model_context_overrides", {}) or {}
+        if not isinstance(overrides, dict) or not model:
+            return None
+        raw = overrides.get(model)
+        if raw is None:
+            ml = model.lower()
+            for key, val in overrides.items():
+                if str(key).lower() == ml:
+                    raw = val
+                    break
+        val = int(raw)
+        return val if val > 0 else None
+    except Exception:
+        return None
+
+
 def effective_context_length(endpoint_url: str, model: str) -> int:
     """Context window actually usable for this endpoint/model.
 
-    For local Ollama, clamp the discovered window to the practical cap that is
-    also sent as num_ctx, so the UI usage counter and the compaction budget
-    match what Ollama really enforces (its /v1 surface silently caps at ~4096).
-    For every other endpoint, return the discovered window unchanged.
+    A manual per-model override (settings, see ``_model_ctx_override``) wins over
+    everything for local Ollama — it is the user's deliberate num_ctx choice and is
+    allowed to EXCEED the practical cap. Otherwise, for local Ollama, clamp the
+    discovered window to the practical cap that is also sent as num_ctx, so the UI
+    usage counter and the compaction budget match what Ollama really enforces (its
+    /v1 surface silently caps at ~4096). For every other endpoint, return the
+    discovered window unchanged.
     """
+    if _is_ollama_endpoint(endpoint_url):
+        override = _model_ctx_override(model)
+        if override:
+            return override
     ctx = get_context_length(endpoint_url, model)
     if _is_ollama_endpoint(endpoint_url):
         cap = ollama_practical_ctx_cap()

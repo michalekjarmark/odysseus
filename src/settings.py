@@ -126,6 +126,14 @@ DEFAULT_SETTINGS = {
     # want to actually use (e.g. 900_000 to fill a 1M-context model). See
     # `compute_input_token_budget`.
     "agent_input_token_hard_max": 200_000,
+    # Manual per-model context-window override for LOCAL OLLAMA models, keyed by
+    # model id (e.g. {"qwen3.5:9b": 32768}). Takes precedence over the global
+    # practical cap (OLLAMA_DEFAULT_PRACTICAL_CTX / OLLAMA_CONTEXT_LENGTH) in
+    # effective_context_length, and may EXCEED it — small models often fit far more
+    # than the 16384 default on this GPU. The chosen value flows to num_ctx, the UI
+    # usage counter, the input budget, and compaction (one source of truth). Only
+    # set values your VRAM can actually serve. Empty = use the global cap.
+    "ollama_model_context_overrides": {},
     "agent_stream_timeout_seconds": 300,
     # Extra directory roots that read_file / write_file may access, in
     # addition to the built-in project data/ and system temp dirs. Each

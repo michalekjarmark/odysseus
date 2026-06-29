@@ -801,6 +801,84 @@ async function initImageSettings() {
   if (enabledToggle) enabledToggle.addEventListener('change', function() { syncImgDisabled(); saveSettings(); });
 }
 
+/* ── Per-model context (Ollama num_ctx) ──
+ * Manual context-window override keyed by model id. Persists to the global
+ * `ollama_model_context_overrides` setting (admin-only POST); the backend's
+ * effective_context_length() reads it and lets it EXCEED the practical cap, so a
+ * small local model can be given more context than the 16k default. The same
+ * value flows to num_ctx, the usage counter, the input budget, and compaction. */
+async function initOllamaContextSettings() {
+  const listEl = el('set-ollamaCtxList');
+  const addBtn = el('set-ollamaCtxAdd');
+  const msg = el('set-ollamaCtxMsg');
+  const datalist = el('set-ollamaCtxModels');
+  if (!listEl || !addBtn) return;
+
+  // Suggest currently-served local (Ollama) model ids, but allow any text so a
+  // model can be pre-configured before it's pulled.
+  try {
+    const modelsRes = await fetch('/api/models', { credentials: 'same-origin' });
+    const modelsData = await modelsRes.json();
+    const ids = new Set();
+    (modelsData.items || []).forEach(item => {
+      if (item.category !== 'local') return;
+      (item.models || []).concat(item.models_extra || []).forEach(mid => ids.add(mid));
+    });
+    if (datalist) {
+      datalist.innerHTML = '';
+      sortModelIds([...ids]).forEach(mid => { const opt = document.createElement('option'); opt.value = mid; datalist.appendChild(opt); });
+    }
+  } catch (e) { console.warn('Failed to load models for context overrides', e); }
+
+  async function save() {
+    const overrides = {};
+    listEl.querySelectorAll('.settings-row').forEach(r => {
+      const inputs = r.querySelectorAll('input');
+      const mid = (inputs[0].value || '').trim();
+      const ctx = parseInt(inputs[1].value, 10);
+      if (mid && Number.isFinite(ctx) && ctx > 0) overrides[mid] = ctx;
+    });
+    try {
+      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ollama_model_context_overrides: overrides }) });
+      if (msg) { msg.textContent = 'Saved — applies on the model’s next message'; msg.style.color = 'var(--fg)'; setTimeout(() => { msg.textContent = ''; }, 2500); }
+    } catch (e) { if (msg) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; } }
+  }
+
+  function _row(model, ctx) {
+    const row = document.createElement('div');
+    row.className = 'settings-row';
+    row.style.cssText = 'display:flex;align-items:center;gap:6px;';
+    const mIn = document.createElement('input');
+    mIn.type = 'text'; mIn.placeholder = 'model id (e.g. qwen3.5:9b)';
+    mIn.setAttribute('list', 'set-ollamaCtxModels');
+    mIn.value = model || '';
+    mIn.style.cssText = 'flex:1;min-width:0;padding:5px;';
+    const cIn = document.createElement('input');
+    cIn.type = 'number'; cIn.min = '512'; cIn.step = '1024'; cIn.placeholder = 'num_ctx';
+    cIn.value = (ctx !== null && ctx !== undefined && ctx !== '') ? ctx : '';
+    cIn.style.cssText = 'width:96px;padding:5px;';
+    const rm = document.createElement('button');
+    rm.type = 'button'; rm.className = 'settings-fallback-remove'; rm.textContent = '✕';
+    rm.title = 'Remove';
+    rm.addEventListener('click', () => { row.remove(); save(); });
+    mIn.addEventListener('change', save);
+    cIn.addEventListener('change', save);
+    row.appendChild(mIn); row.appendChild(cIn); row.appendChild(rm);
+    return row;
+  }
+
+  try {
+    const settingsRes = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    const settings = await settingsRes.json();
+    const overrides = (settings && settings.ollama_model_context_overrides) || {};
+    listEl.innerHTML = '';
+    Object.entries(overrides).forEach(([mid, ctx]) => listEl.appendChild(_row(mid, ctx)));
+  } catch (e) { console.warn('Failed to load context overrides', e); }
+
+  addBtn.addEventListener('click', () => { listEl.appendChild(_row('', '')); });
+}
+
 /* ── Vision ── */
 async function initVisionSettings() {
   const vlSel = el('set-vlModelSelect');
@@ -2345,6 +2423,7 @@ function initAll() {
   initUtilityModel();
   initImageSettings();
   initVisionSettings();
+  initOllamaContextSettings();
   initTtsSettings();
   initSttSettings();
   initSearchSettings();

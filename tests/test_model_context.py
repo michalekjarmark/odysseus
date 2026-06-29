@@ -257,3 +257,60 @@ class TestGetContextLength:
         assert first == model_context.DEFAULT_CONTEXT
         assert second == model_context.DEFAULT_CONTEXT
         assert calls == []
+
+
+class TestEffectiveContextOverride:
+    """Manual per-model context override (settings.ollama_model_context_overrides).
+
+    It must win for local Ollama AND be allowed to EXCEED the practical cap, so a
+    small model can be given more context than the 16384 default; it must be
+    ignored for non-Ollama endpoints and never apply to a model without an entry.
+    """
+
+    def setup_method(self):
+        model_context._context_cache.clear()
+
+    def _patch_overrides(self, monkeypatch, mapping):
+        import src.settings as settings
+        monkeypatch.setattr(
+            settings, "get_setting",
+            lambda key, default=None: mapping if key == "ollama_model_context_overrides" else default,
+        )
+
+    def test_override_exceeds_cap_for_local_ollama(self, monkeypatch):
+        self._patch_overrides(monkeypatch, {"qwen3.5:9b": 32768})
+        # Even if the discovered window is small, the override (above the cap) wins.
+        monkeypatch.setattr(model_context, "_query_context_length", lambda u, m: (4096, True))
+        url = "http://127.0.0.1:11434/v1"
+        assert model_context.effective_context_length(url, "qwen3.5:9b") == 32768
+
+    def test_override_is_case_insensitive(self, monkeypatch):
+        self._patch_overrides(monkeypatch, {"Qwen3.5:9B": 24000})
+        url = "http://127.0.0.1:11434/v1"
+        assert model_context.effective_context_length(url, "qwen3.5:9b") == 24000
+
+    def test_model_without_override_stays_clamped_to_cap(self, monkeypatch):
+        self._patch_overrides(monkeypatch, {"qwen3.5:9b": 32768})
+        monkeypatch.setattr(model_context, "_query_context_length", lambda u, m: (131072, True))
+        url = "http://127.0.0.1:11434/v1"
+        assert model_context.effective_context_length(url, "gemma4:e4b") == model_context.ollama_practical_ctx_cap()
+
+    def test_override_ignored_for_non_ollama_endpoint(self, monkeypatch):
+        self._patch_overrides(monkeypatch, {"gpt-4o": 999999})
+        monkeypatch.setattr(model_context, "_query_context_length", lambda u, m: (128000, True))
+        assert model_context.effective_context_length("https://api.openai.com/v1", "gpt-4o") == 128000
+
+    def test_invalid_override_falls_back_to_cap(self, monkeypatch):
+        self._patch_overrides(monkeypatch, {"qwen3.5:9b": 0})
+        monkeypatch.setattr(model_context, "_query_context_length", lambda u, m: (8192, True))
+        url = "http://127.0.0.1:11434/v1"
+        # 0 is rejected -> clamps the discovered 8192 to the cap (here 8192 < cap).
+        assert model_context.effective_context_length(url, "qwen3.5:9b") == 8192
+
+    def test_override_drives_budget_above_default(self, monkeypatch):
+        from src.context_budget import compute_input_token_budget, DEFAULT_BUDGET
+        self._patch_overrides(monkeypatch, {"qwen3.5:9b": 32768})
+        url = "http://127.0.0.1:11434/v1"
+        ctx = model_context.budget_context_for_model(url, "qwen3.5:9b", fallback=16384)
+        assert ctx == 32768
+        assert compute_input_token_budget(DEFAULT_BUDGET, ctx, explicit=False) == int(32768 * 0.85)
