@@ -31,6 +31,43 @@ set_session_manager = set_session_manager_instance
 get_session_manager = get_session_manager_instance
 
 
+def _context_note_from_tool_events(tool_events: Any) -> str:
+    """Compact, model-facing record of what tools the assistant ran on a turn.
+
+    On history reload the LLM only sees each turn's ``role``/``content`` — a tool's
+    results live in ``metadata.tool_events``, which the model never sees. So after
+    the agent generates an image and replies with prose offering tweaks, a
+    follow-up like "make it colored" arrives with NO record of what was generated
+    (not even the prompt), and the model treats it as a fresh, contextless request.
+
+    This surfaces a short note the model CAN read. Image tools carry the prompt
+    (the essential memory); other tools get just name + command (no output echo)
+    so coding/file sessions aren't bloated. The whole note is length-capped.
+    """
+    if not tool_events or not isinstance(tool_events, (list, tuple)):
+        return ""
+    lines: List[str] = []
+    for ev in tool_events:
+        if not isinstance(ev, dict):
+            continue
+        tool = str(ev.get("tool") or "tool").strip()
+        if ev.get("image_prompt") or ev.get("image_url") or tool in ("generate_image", "edit_image"):
+            prompt = str(ev.get("image_prompt") or ev.get("command") or "").strip()
+            extras = [str(ev[k]) for k in ("image_model", "image_size") if ev.get(k)]
+            meta = f" ({', '.join(extras)})" if extras else ""
+            if prompt:
+                lines.append(f"- {tool}: generated an image{meta} — prompt: {prompt[:400]}")
+            else:
+                lines.append(f"- {tool}: generated an image{meta}")
+        else:
+            cmd = str(ev.get("command") or "").strip()
+            lines.append(f"- {tool}: {cmd[:160]}" if cmd else f"- {tool}")
+    if not lines:
+        return ""
+    note = "[Earlier this turn I used these tools:\n" + "\n".join(lines) + "]"
+    return note[:1200]
+
+
 @dataclass
 class ChatMessage:
     """A single chat message."""
@@ -116,11 +153,28 @@ class Session:
         the model. Display/history-load paths use the raw ``history`` and are
         unaffected.
         """
-        return [
-            msg.to_dict()
-            for msg in self.history
-            if (msg.metadata or {}).get("source") != "slash"
-        ]
+        out: List[Dict[str, Any]] = []
+        for msg in self.history:
+            md = msg.metadata or {}
+            if md.get("source") == "slash":
+                continue
+            d = msg.to_dict()
+            # Replay a compact record of the assistant's tool actions (esp. an
+            # image's prompt) into the content the model can actually read, so
+            # multi-turn edits ("make it colored") keep context. See
+            # _context_note_from_tool_events.
+            if msg.role == "assistant":
+                note = _context_note_from_tool_events(md.get("tool_events"))
+                if note:
+                    content = d.get("content")
+                    if isinstance(content, str) and content.strip():
+                        d["content"] = content + "\n\n" + note
+                    elif isinstance(content, list):
+                        d["content"] = content + [{"type": "text", "text": note}]
+                    else:
+                        d["content"] = note
+            out.append(d)
+        return out
 
     def get(self, key: str, default=None):
         """Dict-like access for compatibility."""
