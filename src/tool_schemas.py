@@ -1210,6 +1210,35 @@ FUNCTION_TOOL_SCHEMAS = [
 # Converter: native function call -> ToolBlock
 # ---------------------------------------------------------------------------
 
+def _norm_tool_name(s: str) -> str:
+    return "".join(c for c in (s or "").lower() if c.isalnum())
+
+
+def _fuzzy_resolve_tool_name(name: str) -> Optional[str]:
+    """Best-effort recovery when a model calls a tool by a descriptive/skill
+    name instead of its registered name.
+
+    Weaker local models (e.g. gemma4) sometimes emit the *skill* heading as the
+    function name -- "generate_images-with-the-image-tool" for generate_image --
+    which fails exact + alias lookup and would otherwise be dropped, leaving the
+    agent round empty (the user saw an "empty prompt" reply, then it worked on a
+    blind retry). Resolve conservatively: normalize away punctuation/case and
+    pick the LONGEST known tool tag whose normalized form is contained in the
+    requested name. The length floor and longest-match rule avoid matching
+    short/ambiguous tags.
+    """
+    norm = _norm_tool_name(name)
+    if len(norm) < 6:
+        return None
+    best = None
+    best_len = 0
+    for tag in TOOL_TAGS:
+        t = _norm_tool_name(tag)
+        if len(t) >= 6 and t in norm and len(t) > best_len:
+            best, best_len = tag, len(t)
+    return best
+
+
 def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock]:
     """Convert a native function call into a ToolBlock for the existing execution pipeline."""
     try:
@@ -1244,8 +1273,13 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
     if name in _BUILTIN_EMAIL_TOOLS:
         return ToolBlock(f"mcp__email__{name}", json.dumps(args) if args else "{}")
     if tool_type not in TOOL_TAGS:
-        logger.warning(f"Unknown function call: {name}")
-        return None
+        resolved = _fuzzy_resolve_tool_name(name)
+        if resolved:
+            logger.info(f"Recovered unknown function call {name!r} as {resolved}")
+            tool_type = resolved
+        else:
+            logger.warning(f"Unknown function call: {name}")
+            return None
 
     # Convert structured args back to the text format each tool expects
     if tool_type == "bash":
