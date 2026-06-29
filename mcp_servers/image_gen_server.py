@@ -84,18 +84,28 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         url, model_id, headers = await asyncio.to_thread(_resolve_model, model_spec)
 
         is_gpt_image = "gpt-image" in model_id.lower()
+        is_dalle = "dall-e" in model_id.lower()
+        is_local_diffusion = not is_gpt_image and not is_dalle
         base_url = url.replace("/chat/completions", "").replace("/v1/messages", "").rstrip("/")
         images_url = base_url + "/images/generations"
 
+        # Only the cloud models constrain size to a fixed menu. Local diffusion
+        # (SDXL) accepts any WxH — clamping it to the DALL-E 3 set silently forced
+        # every request back to 1024x1024 and dropped portrait/landscape requests.
         valid_gpt_sizes = {"1024x1024", "1024x1536", "1536x1024", "auto"}
         valid_dalle3_sizes = {"1024x1024", "1024x1792", "1792x1024"}
         if is_gpt_image and size not in valid_gpt_sizes:
             size = "1024x1024"
-        elif not is_gpt_image and size not in valid_dalle3_sizes:
+        elif is_dalle and size not in valid_dalle3_sizes:
             size = "1024x1024"
 
         payload = {"model": model_id, "prompt": prompt, "n": 1, "size": size}
-        if is_gpt_image:
+        # Pass quality for local diffusion too, not just GPT image models — the
+        # diffusion server maps quality->steps (low=4, medium=8, high=35). Without
+        # it, every agent-driven SDXL render fell back to the server's 8-step
+        # default (fast but soft/garbled), while the direct (non-agent) path —
+        # do_generate_image — sent quality and got the configured high step count.
+        if is_gpt_image or is_local_diffusion:
             payload["quality"] = quality if quality in ("low", "medium", "high", "auto") else "medium"
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)) as client:
