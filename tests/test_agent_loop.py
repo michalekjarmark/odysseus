@@ -282,6 +282,30 @@ class TestComputeFinalMetrics:
         ))
         assert m["context_percent"] == 50.0
 
+    def test_context_tokens_matches_percent_basis(self):
+        """`context_tokens` must equal the number the % is computed from (the
+        last-round prompt), NOT the cumulative input_tokens — so the UI's
+        "used / total" and the bar/% stay consistent on a multi-round turn."""
+        m = _compute_final_metrics(**self._base_args(
+            real_input_tokens=8000,        # cumulative across rounds (shown as input_tokens)
+            last_round_input_tokens=4096,  # the actual context occupancy
+            context_length=8192,
+        ))
+        assert m["input_tokens"] == 8000
+        assert m["context_tokens"] == 4096
+        assert m["context_percent"] == 50.0
+        # used/total == percent: 4096 / 8192 == 50%.
+        assert round(m["context_tokens"] / m["context_length"] * 100) == m["context_percent"]
+
+    def test_context_tokens_falls_back_to_input_tokens(self):
+        """Single-round turn: no last_round value, so context_tokens == input_tokens."""
+        m = _compute_final_metrics(**self._base_args(
+            real_input_tokens=4096,
+            context_length=8192,
+        ))
+        assert m["context_tokens"] == 4096
+        assert m["context_tokens"] == m["input_tokens"]
+
     def test_response_time(self):
         m = _compute_final_metrics(**self._base_args(total_duration=3.456))
         assert m["response_time"] == 3.46

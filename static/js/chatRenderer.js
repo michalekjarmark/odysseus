@@ -1872,7 +1872,10 @@ export function displayMetrics(messageElement, metrics) {
       e.stopPropagation();
       document.querySelectorAll('.ctx-detail-popup').forEach(p => { if (typeof p._dismiss === 'function') p._dismiss(); else p.remove(); });
 
-      const usedTokens = inputTokens || 0;
+      // Use the same token count the % is computed from (context_tokens), so the
+      // "used / total" labels and the bar/percent agree. Falls back to input_tokens
+      // for the plain-chat path (where they're already the same number).
+      const usedTokens = (metrics.context_tokens != null ? metrics.context_tokens : inputTokens) || 0;
       const totalCtx = ctxLen || 0;
       const modelShort = model.split('/').pop();
       const fmtNum = n => n ? n.toLocaleString() : '?';

@@ -1853,6 +1853,11 @@ def _compute_final_metrics(
         "total_tokens": input_tokens + output_tokens,
         "context_length": context_length,
         "context_percent": ctx_pct,
+        # The token count `context_percent` is actually computed against (the peak /
+        # last-round prompt size), so the UI's "X used / Y total" and the % derive
+        # from the SAME number. Distinct from `input_tokens`, which on a multi-round
+        # agent turn is the SUM of every round's prompt and would mismatch the bar.
+        "context_tokens": ctx_tokens,
         "usage_source": "real" if has_real_usage else "estimated",
         "model": model,
     }
