@@ -15,6 +15,11 @@ numpy
 # still degrades to keyword fallback if they're ever missing.
 # chromadb-client is the lightweight HTTP client (talks to a standalone
 # ChromaDB service); fastembed runs local ONNX embeddings.
+# NOTE: a native / single-user install with NO standalone ChromaDB server can run
+# an embedded on-disk store instead — but that needs the FULL `chromadb` package
+# (chromadb-client has no PersistentClient). Swap the line below for `chromadb` and
+# see docs/setup.md "Server-less ChromaDB (embedded)". The two packages conflict, so
+# never install both.
 chromadb-client
 fastembed
 youtube-transcript-api

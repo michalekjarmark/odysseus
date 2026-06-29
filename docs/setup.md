@@ -285,6 +285,28 @@ If `chromadb-client` (the lightweight HTTP-only package) is installed alongside 
 ./venv/bin/pip install --force-reinstall chromadb
 ```
 
+### Server-less ChromaDB (embedded)
+The default `chromadb-client` package only speaks HTTP to a **standalone ChromaDB
+server**, which the Docker Compose stack starts for you. A native / single-user
+install that runs no such server gets nothing — vector memory (incl. per-user facts
+like preferred language), tool-RAG and doc-RAG silently fall back to keyword-only,
+and you'll see `ChromaDB is not reachable` / `ToolIndex init failed` in the logs.
+(On Windows the default ChromaDB port `8100` also collides with the SDXL diffusion
+server, so even starting one there hits the wrong service.)
+
+To run ChromaDB **embedded** (an on-disk store, no separate server), install the
+full package and let the default `auto` mode pick it up:
+```bash
+./venv/bin/pip uninstall chromadb-client -y
+./venv/bin/pip install chromadb        # full package — has PersistentClient
+```
+Restart Odysseus. With no `CHROMADB_HOST`/`CHROMADB_PORT` set, it now opens an
+embedded store at `<data>/chroma` (log: `ChromaDB embedded (PersistentClient) at …`)
+and semantic memory + RAG work with no extra process. Override the location with
+`CHROMADB_PATH`, or force the mode with `CHROMADB_MODE=embedded`. To keep using a
+remote server instead, set `CHROMADB_HOST`/`CHROMADB_PORT` (or `CHROMADB_MODE=http`)
+— that path is unchanged.
+
 ### HTTPS + LAN/Tailscale exposure
 To expose Odysseus on a local network or Tailscale with HTTPS:
 1. Change the bind address to `0.0.0.0` in `.env` (`APP_BIND=0.0.0.0` or `ODYSSEUS_HOST=0.0.0.0`).
@@ -405,6 +427,9 @@ Key settings:
 | `DATABASE_URL` | `sqlite:///./data/app.db` | Database connection string |
 | `CHROMADB_HOST` | `localhost` | ChromaDB host for vector memory. Docker overrides this to `chromadb`. |
 | `CHROMADB_PORT` | `8100` | ChromaDB port for manual host runs. Docker overrides this to `8000`. |
+| `CHROMADB_MODE` | `auto` | `auto` = use a server if `CHROMADB_HOST`/`CHROMADB_PORT` is set, else an embedded on-disk store; `http` = always a server; `embedded` = always on-disk (needs full `chromadb`). See "Server-less ChromaDB (embedded)". |
+| `CHROMADB_PATH` | `<data>/chroma` | On-disk location for the embedded ChromaDB store. |
+| `OLLAMA_CONTEXT_LENGTH` | -- | Fallback default context window (num_ctx) for local Ollama models. The in-app **Settings ▸ AI ▸ Model Context** "global default" supersedes this, and a per-model override supersedes both. |
 | `EMBEDDING_URL` | -- | OpenAI-compatible embeddings endpoint |
 | `ODYSSEUS_CHAT_UPLOAD_MAX_BYTES` | `10485760` | Chat/agent attachment cap in bytes. Raise for larger local PDFs or text documents. |
 | `ODYSSEUS_GALLERY_UPLOAD_MAX_BYTES` | `104857600` | Gallery image upload cap in bytes (100 MB). |
