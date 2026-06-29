@@ -528,6 +528,15 @@ def _build_ollama_payload(
         payload["options"] = options
     if tools:
         payload["tools"] = tools
+    # Suppress thinking for reasoning models (gemma4, qwen3, ...). The OpenAI-
+    # compat /v1 path already did this (it set top-level "think": false) so tool
+    # calls aren't buried inside a <think> block and the model emits the actual
+    # answer / fenced tool block. Routing local /v1 through this native /api/chat
+    # path (the num_ctx fix) bypassed that, so a thinking model would stream its
+    # plan as reasoning and never act — restore the suppression here. Native
+    # /api/chat accepts the same top-level "think" flag.
+    if _supports_thinking(model):
+        payload["think"] = False
     return payload
 
 
