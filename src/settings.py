@@ -139,8 +139,9 @@ DEFAULT_SETTINGS = {
     # A positive value raises (or lowers) the cap for every local Ollama model at
     # once, so you don't have to add a per-model entry for each one — the per-model
     # override still wins and may EXCEED this. Read by `ollama_practical_ctx_cap`;
-    # the env var OLLAMA_CONTEXT_LENGTH hard-overrides both. Higher = more VRAM /
-    # RAM-offload; only set what your card can serve. Applies on the next message.
+    # this deliberate value wins over the ambient OLLAMA_CONTEXT_LENGTH env (which is
+    # only a fallback). Higher = more VRAM / RAM-offload; only set what your card can
+    # serve. Applies on the next message.
     "ollama_default_context": 0,
     "agent_stream_timeout_seconds": 300,
     # Extra directory roots that read_file / write_file may access, in

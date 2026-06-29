@@ -437,19 +437,30 @@ def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
 # can serve nor what Ollama actually enforces. We therefore both *request* this
 # many tokens (num_ctx on the native path, see llm_core) and *budget* against it
 # (UI counter, compaction), so the numbers the user sees match reality.
-# OLLAMA_CONTEXT_LENGTH overrides the ceiling (the same knob Ollama itself reads).
+# The `ollama_default_context` setting raises this ceiling; the OLLAMA_CONTEXT_LENGTH
+# env (the same knob Ollama itself reads) is the fallback. See ollama_practical_ctx_cap.
 OLLAMA_DEFAULT_PRACTICAL_CTX = 16384
 
 
 def ollama_practical_ctx_cap() -> int:
     """Ceiling for a local Ollama context window (when no per-model override).
 
-    Precedence: env ``OLLAMA_CONTEXT_LENGTH`` (a hard ops override) > the global
-    ``ollama_default_context`` setting (the UI knob that applies to ALL local Ollama
-    models at once, so the user need not add a per-model entry for each) >
-    the built-in ``OLLAMA_DEFAULT_PRACTICAL_CTX`` (16384). A per-model override in
+    Precedence: the global ``ollama_default_context`` SETTING (the UI knob that
+    applies to ALL local Ollama models at once, so the user need not add a per-model
+    entry for each) > env ``OLLAMA_CONTEXT_LENGTH`` (an ambient default, often
+    inherited from the Ollama install / shell) > the built-in
+    ``OLLAMA_DEFAULT_PRACTICAL_CTX`` (16384). The deliberate UI value wins over the
+    ambient env so that setting it actually takes effect even when a leftover
+    OLLAMA_CONTEXT_LENGTH is present. A per-model override in
     ``effective_context_length`` still wins over all of this and may EXCEED it.
     """
+    try:
+        from src.settings import get_setting
+        global_default = int(get_setting("ollama_default_context", 0) or 0)
+        if global_default > 0:
+            return global_default
+    except Exception:
+        pass
     raw = os.environ.get("OLLAMA_CONTEXT_LENGTH")
     if raw:
         try:
@@ -458,13 +469,6 @@ def ollama_practical_ctx_cap() -> int:
                 return val
         except (TypeError, ValueError):
             pass
-    try:
-        from src.settings import get_setting
-        global_default = int(get_setting("ollama_default_context", 0) or 0)
-        if global_default > 0:
-            return global_default
-    except Exception:
-        pass
     return OLLAMA_DEFAULT_PRACTICAL_CTX
 
 

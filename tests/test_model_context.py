@@ -319,8 +319,9 @@ class TestEffectiveContextOverride:
 class TestGlobalDefaultContext:
     """Global ``ollama_default_context`` setting: raises the practical cap for ALL
     local Ollama models without a per-model override, so the user need not add an
-    entry for each. Per-model override still wins (and may exceed it); the env var
-    OLLAMA_CONTEXT_LENGTH hard-overrides both; non-Ollama endpoints are untouched.
+    entry for each. Per-model override still wins (and may exceed it); the deliberate
+    UI setting wins over the ambient OLLAMA_CONTEXT_LENGTH env (env is only a
+    fallback); non-Ollama endpoints are untouched.
     """
 
     def setup_method(self):
@@ -356,9 +357,18 @@ class TestGlobalDefaultContext:
         assert model_context.effective_context_length(url, "qwen3.5:9b") == 100000  # override
         assert model_context.effective_context_length(url, "gemma4:e4b") == 65536   # global
 
-    def test_env_hard_overrides_setting(self, monkeypatch):
-        monkeypatch.setenv("OLLAMA_CONTEXT_LENGTH", "20000")
+    def test_setting_overrides_env(self, monkeypatch):
+        # A deliberate UI setting must win over a leftover ambient env var — this is
+        # exactly the case that bit the user (OLLAMA_CONTEXT_LENGTH=16384 silently
+        # pinned the cap while the UI said 65536).
+        monkeypatch.setenv("OLLAMA_CONTEXT_LENGTH", "16384")
         self._patch_settings(monkeypatch, global_default=65536)
+        assert model_context.ollama_practical_ctx_cap() == 65536
+
+    def test_env_used_when_no_setting(self, monkeypatch):
+        # With no UI setting (0), the ambient env is the fallback default.
+        monkeypatch.setenv("OLLAMA_CONTEXT_LENGTH", "20000")
+        self._patch_settings(monkeypatch, global_default=0)
         assert model_context.ollama_practical_ctx_cap() == 20000
 
     def test_zero_global_default_falls_back_to_builtin(self, monkeypatch):
