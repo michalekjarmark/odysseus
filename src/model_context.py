@@ -290,8 +290,20 @@ def budget_context_for_model(endpoint_url: str, model: str, *, fallback: int = 0
     not pair this flag with a context length from a *different* lookup (a stale
     local re-query, or a caller that didn't pass one), which would budget off an
     unproven number (review on #4122). On probe error, returns ``fallback`` (the
-    caller's best-known value) to preserve prior behaviour."""
+    caller's best-known value) to preserve prior behaviour.
+
+    Local Ollama is a special case: a model is almost never in the known-windows
+    table (community fine-tunes never are), so the generic ``known`` gate would
+    collapse to 0 and pin the auto budget at the conservative DEFAULT_BUDGET
+    (6000) even though a real 16384 window is served — that silently trimmed away
+    large attachments. For these endpoints the *effective* (practically-capped)
+    window IS proven: it is exactly the num_ctx we send and Ollama enforces, so
+    budget against it instead."""
     try:
+        if _is_ollama_endpoint(endpoint_url):
+            eff = effective_context_length(endpoint_url, model)
+            if eff and eff > 0:
+                return eff
         ctx, known = get_context_length_known(endpoint_url, model)
         return ctx if known else 0
     except Exception:

@@ -102,6 +102,29 @@ def test_budget_context_binds_known_flag_to_its_own_value():
         assert mc.budget_context_for_model("u", "m", fallback=4096) == 4096
 
 
+def test_local_ollama_budgets_off_effective_window_despite_unknown_model():
+    """Regression: a local Ollama community fine-tune is never in the known-windows
+    table, so the generic `known` gate returned 0 and pinned the auto budget at the
+    conservative DEFAULT_BUDGET (6000) — which silently trimmed large attachments
+    away even though Ollama really serves a 16384 window. For port-11434 endpoints
+    we budget off the *effective* (practically-capped) window, which is exactly the
+    num_ctx we send and Ollama enforces.
+    """
+    url = "http://127.0.0.1:11434/v1"
+    model = "hf.co/empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF:MTP-Q4_K_M"
+    # Even though the model is unknown (bare fallback) AND the endpoint query fails,
+    # effective_context_length yields the practical cap for local Ollama.
+    with patch.object(mc, "get_context_length", return_value=mc.DEFAULT_CONTEXT):
+        ctx = mc.budget_context_for_model(url, model, fallback=mc.DEFAULT_CONTEXT)
+    cap = mc.ollama_practical_ctx_cap()
+    assert ctx == cap
+    assert compute_input_token_budget(DEFAULT_BUDGET, ctx, explicit=False) == int(cap * 0.85)
+
+    # A non-Ollama endpoint with an unknown model must STILL stay conservative (0).
+    with patch.object(mc, "get_context_length_known", return_value=(mc.DEFAULT_CONTEXT, False)):
+        assert mc.budget_context_for_model("https://api.example.com/v1", "x", fallback=0) == 0
+
+
 def test_no_arg_caller_scales_from_discovered_window_not_6000():
     """End-to-end of the fix: a caller that passes no context_length (scheduled
     tasks, teacher escalation, ...) but whose endpoint reports 131072 now scales to
