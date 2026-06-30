@@ -10,9 +10,10 @@ import bisect
 import json
 import logging
 import re
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from src.agent_tools import ToolBlock, TOOL_TAGS
+from src.tool_security import BUILTIN_EMAIL_TOOLS
 
 logger = logging.getLogger(__name__)
 
@@ -20,15 +21,106 @@ logger = logging.getLogger(__name__)
 # Regex patterns
 # ---------------------------------------------------------------------------
 
-# Pattern 1: ```bash ... ``` fenced code blocks
-# After the tag, accept EITHER a newline (the standard multi-line body) OR inline
-# whitespace before same-line content. Weak local models (e.g. some GGUF finetunes)
-# sometimes emit the whole call on a single line — ```read_file "path"``` — which the
-# newline-only form silently dropped for EVERY tool tag, not just read_file.
+# Pattern 1: ```bash ... ``` fenced code blocks. The tag may be followed by a
+# newline (classic form) or by inline JSON args on the same line
+# (```list_email_accounts {}). The same-line part is captured separately
+# (group 2) and judged by _fenced_tool_call below — the regex alone only
+# requires it to start with { or [; anything else after the tag is a Markdown
+# info string (```python title="example.py") and the fence never matches.
+# (?![\w-]) keeps the alternation from prefix-matching longer fence tags:
+# without it, ```python3 would match as tool "python" with content "3\n..."
+# and execute as code.
+# NOTE (fork): a fully-collapsed single-line call like ```read_file "path"```
+# (no newline, a quoted non-JSON arg from weak GGUF finetunes) is NOT matched
+# here — it is recovered by the additive Pattern 8 fallback at the end of
+# parse_tool_blocks, so upstream's regex stays untouched.
 _TOOL_BLOCK_RE = re.compile(
-    r"```(" + "|".join(TOOL_TAGS) + r")(?:[ \t]*\n|[ \t]+)([\s\S]*?)```",
+    r"```(" + "|".join(TOOL_TAGS) + r")(?![\w-])"
+    r"[ \t]*([{\[][^\n]*?)?[ \t]*(?=\r?\n|```)\r?\n?([\s\S]*?)```",
     re.IGNORECASE,
 )
+
+# Tags whose fenced content is raw code, not JSON args. Same-line text after
+# these tags is Markdown fence metadata on a real language (```bash {title=
+# "setup"}), never inline tool args — only the classic tag-then-newline form
+# executes for them.
+_CODE_FENCE_TAGS = frozenset({"bash", "python"})
+
+
+def _fenced_tool_call(m) -> Optional[Tuple[str, str]]:
+    """Classify a Pattern-1 fence match: (tag, content) when it is an
+    executable tool call, None when the fence must stay display text.
+
+    Shared by parse_tool_blocks and strip_tool_blocks so the execute and
+    display decisions can never disagree: a fence that doesn't execute is
+    never stripped, and vice versa.
+
+    Same-line text after the tag only counts as inline tool args when the
+    tag's tool takes JSON args (not a code tag) AND the text is valid
+    standalone JSON. ```bash {title="setup"} and ```python {"x": 1} are
+    fence attributes on real languages, and {title="x"} on any tag is
+    metadata, not arguments — all of those stay visible and inert.
+    """
+    tag = m.group(1).lower()
+    inline = (m.group(2) or "").strip()
+    body = (m.group(3) or "").strip()
+    if not inline:
+        return tag, body
+    if tag in _CODE_FENCE_TAGS:
+        return None
+    # Inline args may continue onto following lines (a JSON object opened on
+    # the tag line); the combined text must parse as JSON or nothing runs.
+    content = f"{inline}\n{body}" if body else inline
+    try:
+        json.loads(content)
+    except (ValueError, TypeError):
+        return None
+    return tag, content
+
+
+def _strip_executed_fence(m) -> str:
+    """re.sub callback: remove only fences that parse as tool calls."""
+    return "" if _fenced_tool_call(m) is not None else m.group(0)
+
+
+# Pattern 8 (fork): a fully-collapsed single-line fenced call —
+# ```read_file "C:\path"``` — with the tag, an inline non-JSON arg, and the
+# closing fence all on ONE line. Weak GGUF finetunes emit this shape; upstream's
+# _TOOL_BLOCK_RE only matches a newline (classic body) or inline JSON after the
+# tag, so it silently drops the collapsed form for every tag. This additive
+# fallback recovers it WITHOUT touching the upstream regex. Like _fenced_tool_call
+# it is shared by parse (Pattern 8 loop) and strip (_strip_collapsed_fence) so the
+# execute and display decisions can never disagree. (?![\w-]) blocks longer-tag
+# prefix matches; the [ \t]+ floor keeps the no-arg ```read_file``` inert.
+_COLLAPSED_FENCE_RE = re.compile(
+    r"```(" + "|".join(TOOL_TAGS) + r")(?![\w-])[ \t]+([^\n`]+?)[ \t]*```",
+    re.IGNORECASE,
+)
+
+
+def _collapsed_fenced_call(m) -> Optional[Tuple[str, str]]:
+    """Classify a collapsed single-line fence: (tag, content) or None.
+
+    Non-code tags get one layer of matching quotes unwrapped so the arg isn't
+    taken literally (the read_file/ls/glob parsers use the raw content as the
+    path/query), e.g. ```read_file "p"``` -> (read_file, p). Code tags (bash,
+    python) keep their quotes — they're meaningful in shell/code.
+    """
+    tag = m.group(1).lower()
+    content = (m.group(2) or "").strip()
+    if not content:
+        return None
+    if (tag not in _CODE_FENCE_TAGS and len(content) >= 2
+            and content[0] in "\"'" and content[-1] == content[0]):
+        content = content[1:-1].strip()
+        if not content:
+            return None
+    return tag, content
+
+
+def _strip_collapsed_fence(m) -> str:
+    """re.sub callback: remove a collapsed fence only when it's a real call."""
+    return "" if _collapsed_fenced_call(m) is not None else m.group(0)
 
 # Pattern 2: [TOOL_CALL] ... [/TOOL_CALL] blocks (some models use this format)
 # Matches: {tool => "shell", args => {--command "ls -la"}} etc.
@@ -1024,9 +1116,20 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
     # Pattern 1: fenced code blocks (skipped when `skip_fenced` — see docstring).
     if not skip_fenced:
         for m in _TOOL_BLOCK_RE.finditer(text):
-            tag = m.group(1).lower()
-            content = m.group(2).strip()
+            call = _fenced_tool_call(m)
+            if call is None:
+                continue
+            tag, content = call
             if not content:
+                # An empty fence is still an unambiguous call for the email
+                # tools — ```list_email_accounts``` with no body is a shape
+                # local models really emit for no-arg tools. Dispatch with
+                # empty args and let the tool's own validation answer;
+                # silently dropping the call left models concluding email was
+                # broken. Other tags (bash, python, ...) keep skipping: empty
+                # content is nothing to run.
+                if tag in BUILTIN_EMAIL_TOOLS:
+                    blocks.append(ToolBlock(tag, ""))
                 continue
             # Single-line / single-token argument: weak models quote the inline arg,
             # e.g. ```read_file "C:\path"```. For non-shell path/query tools, unwrap
@@ -1145,6 +1248,25 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
         if json_tc:
             blocks.append(json_tc[0])
 
+    # Pattern 8 (fork): collapsed single-line fenced call ```tag arg``` that
+    # upstream's _TOOL_BLOCK_RE (newline/JSON-only after the tag) drops. Weak
+    # GGUF finetunes emit this; recover it as a last resort. python/bash get the
+    # same misfenced-lookup pass as Pattern 1 so a read_file/web_search call
+    # hidden in a shell fence is still routed correctly. See _COLLAPSED_FENCE_RE.
+    if not blocks and not skip_fenced:
+        for m in _COLLAPSED_FENCE_RE.finditer(text):
+            call = _collapsed_fenced_call(m)
+            if call is None:
+                continue
+            tag, content = call
+            if tag in ("python", "bash"):
+                block = (_parse_misfenced_web_lookup(content)
+                         or _parse_misfenced_read_file_lookup(content, allow_shell_style=(tag == "bash")))
+                if block:
+                    blocks.append(block)
+                    continue
+            blocks.append(ToolBlock(tag, content))
+
     return blocks
 
 
@@ -1164,7 +1286,15 @@ def strip_tool_blocks(text: str, skip_fenced: bool = False) -> str:
     # Normalize DSML first so its markup gets stripped by the <invoke>
     # / <tool_call> removers below instead of leaking to the user.
     text = _normalize_dsml(text)
-    cleaned = text if skip_fenced else _TOOL_BLOCK_RE.sub('', text)
+    # Keep the executed-vs-illustrative fence distinction (only strip fences
+    # that actually dispatched; leave example fences from native models inert
+    # but visible), then remove [TOOL_CALL]{...}[/TOOL_CALL] markup.
+    cleaned = text if skip_fenced else _TOOL_BLOCK_RE.sub(_strip_executed_fence, text)
+    # Mirror Pattern 8 (parse): also drop a collapsed single-line ```tag arg```
+    # that the newline/JSON-only _TOOL_BLOCK_RE above leaves behind, so a
+    # recovered collapsed call never doubles as visible text.
+    if not skip_fenced:
+        cleaned = _COLLAPSED_FENCE_RE.sub(_strip_collapsed_fence, cleaned)
     # Forward-only removal mirrors parse_tool_blocks: _strip_delimited pairs each
     # opener with a later closer and stops when none is reachable, so untrusted
     # output can't drive the O(n^2) lazy-rescan (ReDoS); see _iter_delimited.
